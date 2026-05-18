@@ -1,9 +1,10 @@
 module OdsIO
 
 export ods_readall, ods_read, ods_write, odsio_autotest, toDf!, toDf
-using PyCall, DataFrames, DataStructures#, Missings #, BinDeps
+using CondaPkg, PythonCall, DataFrames, DataStructures#, Missings #, BinDeps
 
 
+#=
 # This to allow precompilation
 # Unlike the @pyimport macro, this does not define a Julia module and members cannot be accessed with s.name.
 # @see https://github.com/JuliaPy/PyCall.jl/issues/328
@@ -20,6 +21,34 @@ function __init__()
     copy!(ezodf, pyimport("ezodf"))
     copy!(pyio, pyimport("io"))
 end
+=#
+
+#=
+const  ezodf = PythonCall.PyNULL()
+const  pyio  = PythonCall.PyNULL()
+
+function __init__()
+   #@BinDeps.load_dependencies
+    try
+        pyimport("ezodf")
+    catch
+        error("The OdsIO module is correctly installed, but the associated Python Conda installation is missing the 'ezodf' module.")
+        #CondaPkg.add("ezodf")
+    end
+    copy!(ezodf, pyimport("ezodf"))
+    copy!(pyio, pyimport("io"))
+end
+=#
+
+#CondaPkg.add("ezodf")
+
+const ezodf_ref = Ref{Py}()
+const pyio_ref = Ref{Py}()
+function __init__()
+    ezodf_ref[] = pyimport("ezodf")
+    pyio_ref[] = pyimport("io")
+end
+
 
 """
    ods_write(filename,data)
@@ -50,16 +79,12 @@ julia> ods_write("TestSpreadsheet.ods",Dict(("TestSheet",3,2)=>[[1,2,3,4,5] [6,7
 ```
 """
 function ods_write(filename::AbstractString, data::Any)
-    #try
-    #    @pyimport ezodf
-    #catch
-    #    error("The OdsIO module is correctly installed, but your python installation is missing the 'ezodf' module.")
-    #end
-    #@pyimport ezodf
+    ezodf = ezodf_ref[]
+    pyio  = pyio_ref[]
     nSheetsOrig = 0
     if isfile(filename)
         doc = ezodf.opendoc(filename)
-        if doc.doctype == "ods"
+        if pyconvert(String,doc.doctype) == "ods"
             destDoc = doc
             nSheetsOrig = length(doc.sheets)
         else
@@ -109,12 +134,15 @@ function ods_write(filename::AbstractString, data::Any)
                 destDoc.sheets.__iadd__(sheet)
             end
         end
+        nrows = pyconvert(Int64, sheet.nrows())
+        ncols = pyconvert(Int64, sheet.nrows())
+
         # adding empty rows/cols to fit with the new data
-        if sheet.nrows()<sRSize
-            sheet.append_rows(max(0,sRSize-sheet.nrows()))
+        if nrows<sRSize
+            sheet.append_rows(max(0,sRSize-nrows))
         end
-        if sheet.ncols()<sCSize
-            sheet.append_columns(max(0,sCSize-sheet.ncols())) # adding empty rows to suit the new data
+        if ncols<sCSize
+            sheet.append_columns(max(0,sCSize-ncols)) # adding empty rows to suit the new data
         end
 
         for r in range(1, length=size(v)[1])
@@ -123,10 +151,10 @@ function ods_write(filename::AbstractString, data::Any)
                 c2 = k[3] + c -1
                 if ismissing(v[r,c]) || v[r,c]==nothing
                   emptyCell = ezodf.Cell()
-                  dcell = get(sheet,(r2-1,c2-1)) # Pycall 1.9 update (moving from 0 based to 1 based)
+                  dcell = sheet[r2-1,c2-1] 
                   dcell = emptyCell
                 else
-                   dcell = get(sheet,(r2-1,c2-1)) # Pycall 1.9 update (moving from 0 based to 1 based)
+                   dcell = sheet[r2-1,c2-1]
                    dcell.set_value(v[r,c])
                 end
             end
@@ -134,6 +162,7 @@ function ods_write(filename::AbstractString, data::Any)
     end # end for each (k,v) in data
     destDoc.backup = false
     destDoc.save()
+    return nothing
 end
 
 """
@@ -169,13 +198,8 @@ Dict{Any, Any} with 3 entries:
 ```
 """
 function ods_readall(filename_or_stream;sheetsNames::AbstractVector=String[],sheetsPos::AbstractVector=Int64[],ranges::AbstractVector=Tuple{Tuple{Int64,Int64},Tuple{Int64,Int64}}[],innerType::AbstractString="Matrix")
-
-    #try
-    #   @pyimport ezodf
-    #catch
-    #  error("The OdsIO module is correctly installed, but your python installation is missing the 'ezodf' module.")
-    #end
-    #@pyimport ezodf
+    ezodf = ezodf_ref[]
+    pyio  = pyio_ref[]
     toReturn = Dict() # The outer container is always a dictionary
     if typeof(filename_or_stream) <: AbstractString
         try
@@ -204,12 +228,12 @@ function ods_readall(filename_or_stream;sheetsNames::AbstractVector=String[],she
     sheetsCounter=0
 
     for (is, sheet) in enumerate(doc.sheets)
-        if is in sheetsPos || sheet.name in sheetsNames || (isempty(sheetsNames) && isempty(sheetsPos))
+        if is in sheetsPos || pyconvert(String,sheet.name) in sheetsNames || (isempty(sheetsNames) && isempty(sheetsPos))
             sheetsCounter += 1
             r_min = 1
-            r_max = sheet.nrows()
+            r_max = pyconvert(Int64,sheet.nrows())
             c_min = 1
-            c_max = sheet.ncols()
+            c_max = pyconvert(Int64,sheet.ncols())
             try
                 if !isempty(ranges) && !isempty(ranges[sheetsCounter])
                     r_min::Int64     = ranges[sheetsCounter][1][1]
@@ -269,29 +293,21 @@ function ods_readall(filename_or_stream;sheetsNames::AbstractVector=String[],she
                         c::Int64=1
                         for (j::Int64, cell) in enumerate(row)
                             if (j>=c_min && j<=c_max)
-                                # Try saving the value as integer if that's actually possible
-                                if typeof(cell.value) <: Number
-                                    if isinteger(cell.value)
-                                        innerMatrix[[r],[c]] .= convert(Int64,cell.value)
-                                    else
-                                        innerMatrix[[r],[c]] .= cell.value
-                                    end
-                                else
-                                    innerMatrix[[r],[c]] .= cell.value
-                                end
+                                innerMatrix[[r],[c]] .= pyconvert(Any,cell.value)
                                 c = c+1
                             end
                         end
                         r = r+1
                     end
                 end
+                sheetname = pyconvert(String,sheet.name)
                 if innerType=="Matrix"
-                    toReturnKeyType == "name" ? toReturn[sheet.name] = innerMatrix : toReturn[is] = innerMatrix
+                    toReturnKeyType == "name" ? toReturn[sheetname] = innerMatrix : toReturn[is] = innerMatrix
                 elseif innerType == "Dict"
-                    toReturnKeyType == "name" ? toReturn[sheet.name] = Dict([(ch,innerMatrix[2:end,cix]) for (cix::Int64,ch) in enumerate(innerMatrix[1,:])]) : toReturn[is] = Dict([(ch,innerMatrix[2:end,cix]) for (cix,ch) in enumerate(innerMatrix[1,:])])
+                    toReturnKeyType == "name" ? toReturn[sheetname] = Dict([(ch,innerMatrix[2:end,cix]) for (cix::Int64,ch) in enumerate(innerMatrix[1,:])]) : toReturn[is] = Dict([(ch,innerMatrix[2:end,cix]) for (cix,ch) in enumerate(innerMatrix[1,:])])
                 elseif innerType == "DataFrame"
                     df = toDf!(innerMatrix)
-                    toReturnKeyType == "name" ? toReturn[sheet.name] =   df : toReturn[is] = df
+                    toReturnKeyType == "name" ? toReturn[sheetname] =   df : toReturn[is] = df
                 end # innerType is really a df
             else # end innerTpe is a Dict check
                 error("Only 'Matrix', 'Dict' or 'DataFrame' are supported as innerType/retType.'")
@@ -351,10 +367,12 @@ end
 """
     odsio_autotest()
 
-Check that the module compiles and the PyCall dependency is respected (it doesn't however check for python ezodf presence)
+Check that the module compiles and the PythonCall and ezodf python dependencies are respected
 
 """
 function odsio_autotest()
+    #ezodf = pyimport("ezodf")
+    #pyio  = pyimport("io")
   return 1
 end
 

@@ -1,0 +1,6 @@
+[deps]
+ezodf = ""
+
+    [deps.python]
+    version = ">=3.10,<3.13"
+    
